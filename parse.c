@@ -22,77 +22,131 @@ void	print_unexpected(t_token *t)
 	printf("Unexpected token '%c'\n", c);
 }
 
-/*
-** factor := number | '(' expr ')'
-** Handles the parenthesis: an opening paren makes us solve the whole
-** sub-expression inside it before anything else, via recursion.
-*/
-int	parse_factor(t_parser *p, int *result)
+static int	precedence(t_toktype op)
 {
+	if (op == TOK_STAR)
+		return (2);
+	return (1);
+}
+
+/*
+** Pops the operator on top of the stack together with its two
+** operands, solves it and pushes the result back. Every '*' gets
+** popped (and solved) before any '+' below it, since '*' always has
+** the higher precedence value.
+*/
+static void	apply_top(t_stack *s)
+{
+	int			rhs;
+	int			lhs;
+	t_toktype	op;
+
+	rhs = s->vals[--s->vtop];
+	lhs = s->vals[--s->vtop];
+	op = s->ops[--s->otop];
+	if (op == TOK_PLUS)
+		s->vals[s->vtop++] = lhs + rhs;
+	else
+		s->vals[s->vtop++] = lhs * rhs;
+}
+
+static int	fail(t_stack *s, t_token *t)
+{
+	print_unexpected(t);
+	free(s->vals);
+	free(s->ops);
+	return (-1);
+}
+
+static int	count_tokens(t_token *tokens)
+{
+	int	n;
+
+	n = 0;
+	while (tokens[n].type != TOK_END)
+		n++;
+	return (n);
+}
+
+/*
+** Iterative (no recursion) shunting-yard style evaluator: one left to
+** right pass over the token array, using two explicit stacks instead
+** of the call stack. '(' is simply pushed and later popped by its
+** ')', which is exactly "solve the parenthesis"; '*' is popped and
+** solved before a lower priority '+' waiting below it on the operator
+** stack, which is "solve the multiplications, then the additions".
+*/
+int	evaluate(t_token *tokens, int *result)
+{
+	t_stack	s;
+	int		i;
+	int		expect_operand;
 	t_token	*t;
 
-	t = &p->tokens[p->pos];
-	if (t->type == TOK_NUM)
+	s.vals = malloc(sizeof(int) * (count_tokens(tokens) + 1));
+	s.ops = malloc(sizeof(t_toktype) * (count_tokens(tokens) + 1));
+	if (!s.vals || !s.ops)
 	{
-		*result = t->value;
-		p->pos++;
-		return (1);
+		free(s.vals);
+		free(s.ops);
+		return (0);
 	}
-	if (t->type == TOK_LPAREN)
+	s.vtop = 0;
+	s.otop = 0;
+	expect_operand = 1;
+	i = 0;
+	while (1)
 	{
-		p->pos++;
-		if (!parse_expr(p, result))
-			return (0);
-		t = &p->tokens[p->pos];
-		if (t->type != TOK_RPAREN)
+		t = &tokens[i];
+		if (t->type == TOK_NUM)
 		{
-			print_unexpected(t);
-			return (0);
+			if (!expect_operand)
+				return (fail(&s, t));
+			s.vals[s.vtop++] = t->value;
+			expect_operand = 0;
 		}
-		p->pos++;
-		return (1);
+		else if (t->type == TOK_PLUS || t->type == TOK_STAR)
+		{
+			if (expect_operand)
+				return (fail(&s, t));
+			while (s.otop > 0 && s.ops[s.otop - 1] != TOK_LPAREN
+				&& precedence(s.ops[s.otop - 1]) >= precedence(t->type))
+				apply_top(&s);
+			s.ops[s.otop++] = t->type;
+			expect_operand = 1;
+		}
+		else if (t->type == TOK_LPAREN)
+		{
+			if (!expect_operand)
+				return (fail(&s, t));
+			s.ops[s.otop++] = TOK_LPAREN;
+		}
+		else if (t->type == TOK_RPAREN)
+		{
+			if (expect_operand)
+				return (fail(&s, t));
+			while (s.otop > 0 && s.ops[s.otop - 1] != TOK_LPAREN)
+				apply_top(&s);
+			if (s.otop == 0)
+				return (fail(&s, t));
+			s.otop--;
+			expect_operand = 0;
+		}
+		else
+		{
+			if (expect_operand)
+				return (fail(&s, t));
+			while (s.otop > 0)
+			{
+				if (s.ops[s.otop - 1] == TOK_LPAREN)
+					return (fail(&s, t));
+				apply_top(&s);
+			}
+			*result = s.vals[0];
+			free(s.vals);
+			free(s.ops);
+			return (1);
+		}
+		i++;
 	}
-	print_unexpected(t);
-	return (0);
-}
-
-/*
-** term := factor ('*' factor)*
-** Solves every multiplication before returning to parse_expr, so '+'
-** never gets a chance to run before the '*' around it.
-*/
-int	parse_term(t_parser *p, int *result)
-{
-	int	rhs;
-
-	if (!parse_factor(p, result))
-		return (0);
-	while (p->tokens[p->pos].type == TOK_STAR)
-	{
-		p->pos++;
-		if (!parse_factor(p, &rhs))
-			return (0);
-		*result = *result * rhs;
-	}
-	return (1);
-}
-
-/*
-** expr := term ('+' term)*
-** Solved last: additions are the outermost/lowest priority operation.
-*/
-int	parse_expr(t_parser *p, int *result)
-{
-	int	rhs;
-
-	if (!parse_term(p, result))
-		return (0);
-	while (p->tokens[p->pos].type == TOK_PLUS)
-	{
-		p->pos++;
-		if (!parse_term(p, &rhs))
-			return (0);
-		*result = *result + rhs;
-	}
-	return (1);
 }
